@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"k8s.io/api/extensions/v1beta1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +25,7 @@ import (
 )
 
 type IngressWhitelisterController struct {
+	Clientset                       *kubernetes.Clientset
 	WatchedIngresses                map[string]string
 	WatchedIngressesMutex           sync.RWMutex
 	AvailableWhitelists             map[string]string
@@ -38,6 +41,7 @@ type IngressWhitelisterController struct {
 }
 
 func NewController(
+	clientset *kubernetes.Clientset,
 	configMapQueue workqueue.RateLimitingInterface,
 	ingressQueue workqueue.RateLimitingInterface,
 	configMapIndexer cache.Indexer,
@@ -48,6 +52,7 @@ func NewController(
 	whitelistSourceRangesAnnotation string,
 ) *IngressWhitelisterController {
 	return &IngressWhitelisterController{
+		Clientset:                       clientset,
 		WatchedIngresses:                map[string]string{},
 		WatchedIngressesMutex:           sync.RWMutex{},
 		AvailableWhitelists:             map[string]string{},
@@ -96,22 +101,43 @@ func (c *IngressWhitelisterController) unwatchIngress(key string) {
 }
 
 func (c *IngressWhitelisterController) cleanIngress(ingress *v1beta1.Ingress) {
-	klog.Infof("Cleaning ingress: %s", ingress.GetName())
+	klog.Infof("Cleaning ingress: %s/%s", ingress.GetNamespace(), ingress.GetName())
+
+	delete(ingress.Annotations, c.WhitelistSourceRangesAnnotation)
+	client := c.Clientset.ExtensionsV1beta1().Ingresses(ingress.GetNamespace())
+	_, updateErr := client.Update(ingress)
+
+	if updateErr != nil {
+		retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			result, getErr := client.Get(ingress.GetName(), metav1.GetOptions{})
+			if getErr != nil {
+				klog.Fatalf("Failed to get latest version of ingress: %v", getErr)
+			}
+
+			delete(ingress.Annotations, c.WhitelistSourceRangesAnnotation)
+			_, updateErr := client.Update(result)
+			return updateErr
+		})
+
+		if retryErr != nil {
+			klog.Fatalf("Cleaning ingress failed: %v", retryErr)
+		}
+	}
 }
 
 func (c *IngressWhitelisterController) updateIngress(key string) error {
 	obj, exists, err := c.IngressIndexer.GetByKey(key)
 	if err != nil {
-		klog.Errorf("Fetching Ingress with key %s from store failed with %v", key, err)
+		klog.Errorf("Fetching ingress with key \"%s\" from store failed with %v", key, err)
 		return err
 	}
 
 	if !exists {
-		klog.Infof("Ingress %s does not exist anymore", key)
+		klog.Infof("Ingress \"%s\" does not exist anymore", key)
 		c.unwatchIngress(key)
 	} else {
 		var ingress = obj.(*v1beta1.Ingress)
-		klog.Infof("Processing Ingress %s", ingress.GetName())
+		klog.Infof("Processing Ingress %s/%s", ingress.GetNamespace(), ingress.GetName())
 
 		currentWhitelist, hasWhitelist := ingress.Annotations[c.WhitelistAnnotation]
 		currentWhitelistSourceRange, hasWhitelistSourceRange := ingress.Annotations[c.WhitelistSourceRangesAnnotation]
@@ -135,7 +161,7 @@ func (c *IngressWhitelisterController) updateIngress(key string) error {
 		whitelistChanged := !watched || (watched && currentWhitelist != cachedWhitelist)
 
 		if whitelistChanged {
-			klog.Infof("Attaching whitelist %s to ingress: %s", currentWhitelist, ingress.GetName())
+			klog.Infof("Attaching whitelist %s to ingress: %s/%s", currentWhitelist, ingress.GetNamespace(), ingress.GetName())
 			c.WatchedIngressesMutex.Lock()
 			c.WatchedIngresses[key] = currentWhitelist
 			c.WatchedIngressesMutex.Unlock()
@@ -153,7 +179,7 @@ func (c *IngressWhitelisterController) updateIngress(key string) error {
 		whitelistSourceRangeChanged := !hasWhitelistSourceRange || currentWhitelistSourceRange != realWhitelistSourceRange
 
 		if whitelistChanged || whitelistSourceRangeChanged {
-			klog.Infof("Updating ingress: %s", ingress.GetName())
+			klog.Infof("Updating ingress: %s/%s", ingress.GetNamespace(), ingress.GetName())
 		}
 	}
 	return nil
@@ -405,6 +431,7 @@ func main() {
 	ingressIndexer, ingressInformer := cache.NewIndexerInformer(ingressWatcher, &v1beta1.Ingress{}, 0, NewQueueAddingEventHandler(ingressQueue, "Ingress"), cache.Indexers{})
 
 	controller := NewController(
+		clientset,
 		configMapQueue,
 		ingressQueue,
 		configMapIndexer,
