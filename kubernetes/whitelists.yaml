@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingress-whitelister
+  labels:
+    app: ingress-whitelister
+data:
+  whitelist1: 0.0.0.0/32
+  whitelist2: >-
+    10.10.0.0/16, 33.0.0.0/8,
+    128.128.33.161/32
+  whitelist3: >-
+    10.10.0.0/16, 33.0.0.0/8,
+    10.10.0.0/16, 33.0.0.0/8,
+    128.128.33.161/32,

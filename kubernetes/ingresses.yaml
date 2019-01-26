@@ -1,0 +1,67 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: cheese1
+  annotations:
+    kubernetes.io/ingress.class: traefik
+spec:
+  rules:
+    - host: stilton.minikube
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: stilton
+              servicePort: http
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: cheese2
+  annotations:
+    kubernetes.io/ingress.class: traefik
+    ingress-whitelister.ingress.kubernetes.io/whitelist-name: whitelist1
+spec:
+  rules:
+    - host: stilton2.minikube
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: stilton
+              servicePort: http
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: cheese3
+  annotations:
+    kubernetes.io/ingress.class: traefik
+    ingress-whitelister.ingress.kubernetes.io/whitelist-name: whitelist2
+    ingress-whitelister.ingress.kubernetes.io/whitelist-source-range: 1.1.1.0/24
+spec:
+  rules:
+    - host: stilton3.minikube
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: stilton
+              servicePort: http
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: cheese4
+  annotations:
+    kubernetes.io/ingress.class: traefik
+    ingress-whitelister.ingress.kubernetes.io/whitelist-source-range: 1.1.1.0/24
+spec:
+  rules:
+    - host: stilton4.minikube
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: stilton
+              servicePort: http
