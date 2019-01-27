@@ -111,7 +111,7 @@ func (c *IngressWhitelisterController) cleanIngress(ingress *v1beta1.Ingress) {
 		retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			result, getErr := client.Get(ingress.GetName(), metav1.GetOptions{})
 			if getErr != nil {
-				klog.Fatalf("Failed to get latest version of ingress: %v", getErr)
+				klog.Errorf("Failed to get latest version of ingress: %v", getErr)
 			}
 
 			delete(ingress.Annotations, c.WhitelistSourceRangesAnnotation)
@@ -120,12 +120,37 @@ func (c *IngressWhitelisterController) cleanIngress(ingress *v1beta1.Ingress) {
 		})
 
 		if retryErr != nil {
-			klog.Fatalf("Cleaning ingress failed: %v", retryErr)
+			klog.Errorf("Cleaning ingress failed: %v", retryErr)
 		}
 	}
 }
 
-func (c *IngressWhitelisterController) updateIngress(key string) error {
+func (c *IngressWhitelisterController) whitelistIngress(whitelistSourceRange string, ingress *v1beta1.Ingress) {
+	klog.Infof("Whitelisting ingress: %s/%s", ingress.GetNamespace(), ingress.GetName())
+
+	ingress.Annotations[c.WhitelistSourceRangesAnnotation] = whitelistSourceRange
+	client := c.Clientset.ExtensionsV1beta1().Ingresses(ingress.GetNamespace())
+	_, updateErr := client.Update(ingress)
+
+	if updateErr != nil {
+		retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			result, getErr := client.Get(ingress.GetName(), metav1.GetOptions{})
+			if getErr != nil {
+				klog.Errorf("Failed to get latest version of ingress: %v", getErr)
+			}
+
+			ingress.Annotations[c.WhitelistSourceRangesAnnotation] = whitelistSourceRange
+			_, updateErr := client.Update(result)
+			return updateErr
+		})
+
+		if retryErr != nil {
+			klog.Errorf("Whitelisting ingress failed: %v", retryErr)
+		}
+	}
+}
+
+func (c *IngressWhitelisterController) processIngress(key string) error {
 	obj, exists, err := c.IngressIndexer.GetByKey(key)
 	if err != nil {
 		klog.Errorf("Fetching ingress with key \"%s\" from store failed with %v", key, err)
@@ -137,7 +162,7 @@ func (c *IngressWhitelisterController) updateIngress(key string) error {
 		c.unwatchIngress(key)
 	} else {
 		var ingress = obj.(*v1beta1.Ingress)
-		klog.Infof("Processing Ingress %s/%s", ingress.GetNamespace(), ingress.GetName())
+		klog.Infof("Processing ingress %s/%s", ingress.GetNamespace(), ingress.GetName())
 
 		currentWhitelist, hasWhitelist := ingress.Annotations[c.WhitelistAnnotation]
 		currentWhitelistSourceRange, hasWhitelistSourceRange := ingress.Annotations[c.WhitelistSourceRangesAnnotation]
@@ -158,9 +183,9 @@ func (c *IngressWhitelisterController) updateIngress(key string) error {
 		cachedWhitelist, watched := c.WatchedIngresses[key]
 		c.WatchedIngressesMutex.RUnlock()
 
-		whitelistChanged := !watched || (watched && currentWhitelist != cachedWhitelist)
+		whitelistChanged := watched && currentWhitelist != cachedWhitelist
 
-		if whitelistChanged {
+		if !watched || whitelistChanged {
 			klog.Infof("Attaching whitelist %s to ingress: %s/%s", currentWhitelist, ingress.GetNamespace(), ingress.GetName())
 			c.WatchedIngressesMutex.Lock()
 			c.WatchedIngresses[key] = currentWhitelist
@@ -180,26 +205,27 @@ func (c *IngressWhitelisterController) updateIngress(key string) error {
 
 		if whitelistChanged || whitelistSourceRangeChanged {
 			klog.Infof("Updating ingress: %s/%s", ingress.GetNamespace(), ingress.GetName())
+			c.whitelistIngress(realWhitelistSourceRange, ingress)
 		}
 	}
 	return nil
 }
 
-func (c *IngressWhitelisterController) updateWhiteListRanges(key string) error {
+func (c *IngressWhitelisterController) processWhitelists(key string) error {
 	obj, exists, err := c.ConfigMapIndexer.GetByKey(key)
 	if err != nil {
-		klog.Errorf("Fetching ConfigMap with key %s from store failed with %v", key, err)
+		klog.Errorf("Fetching configmap with key %s from store failed with %v", key, err)
 		return err
 	}
 
 	if !exists {
-		klog.Info("Cleaning whitelists as ConfigMap does not exist anymore")
+		klog.Info("Cleaning whitelists as configmap does not exist anymore")
 		c.AvailableWhitelistsMutex.Lock()
 		c.AvailableWhitelists = map[string]string{}
 		c.AvailableWhitelistsMutex.Unlock()
 	} else {
 		var configmap = obj.(*v1.ConfigMap)
-		klog.Infof("Updating whitelists from ConfigMap: %s", configmap.GetName())
+		klog.Infof("Updating whitelists from configmap: %s", configmap.GetName())
 
 		c.AvailableWhitelistsMutex.Lock()
 		c.AvailableWhitelists = configmap.Data
@@ -212,6 +238,7 @@ func (c *IngressWhitelisterController) updateWhiteListRanges(key string) error {
 	c.WatchedIngressesMutex.RLock()
 	for ingressKey := range c.WatchedIngresses {
 		klog.Infof("Touching ingress: %s", ingressKey)
+		c.IngressQueue.Add(ingressKey)
 	}
 	c.WatchedIngressesMutex.RUnlock()
 
@@ -255,18 +282,13 @@ func (c *IngressWhitelisterController) Run(threadiness int, stopCh chan struct{}
 	// Let the workers stop when we are done
 	defer c.ConfigMapQueue.ShutDown()
 	defer c.IngressQueue.ShutDown()
-	klog.Info("Starting Ingress Whitelister controller")
+	klog.Info("Starting ingress whitelister controller")
 
 	go c.ConfigMapInformer.Run(stopCh)
-	go c.IngressInformer.Run(stopCh)
 
 	// Wait for all involved caches to be synced, before processing items from the ConfigMapQueue is started
 	if !cache.WaitForCacheSync(stopCh, c.ConfigMapInformer.HasSynced) {
-		runtime.HandleError(fmt.Errorf("timed out waiting for ConfigMap caches to sync"))
-		return
-	}
-	if !cache.WaitForCacheSync(stopCh, c.IngressInformer.HasSynced) {
-		runtime.HandleError(fmt.Errorf("timed out waiting for Ingress caches to sync"))
+		runtime.HandleError(fmt.Errorf("timed out waiting for configmap caches to sync"))
 		return
 	}
 
@@ -274,30 +296,37 @@ func (c *IngressWhitelisterController) Run(threadiness int, stopCh chan struct{}
 		go wait.Until(c.runConfigMapWorker, time.Second, stopCh)
 	}
 
+	go c.IngressInformer.Run(stopCh)
+
+	if !cache.WaitForCacheSync(stopCh, c.IngressInformer.HasSynced) {
+		runtime.HandleError(fmt.Errorf("timed out waiting for ingress caches to sync"))
+		return
+	}
+
 	for i := 0; i < threadiness; i++ {
 		go wait.Until(c.runIngressWorker, time.Second, stopCh)
 	}
 
 	<-stopCh
-	klog.Info("Stopping Ingress Whitelister controller")
+	klog.Info("Stopping ingress whitelister controller")
 }
 
 func (c *IngressWhitelisterController) runIngressWorker() {
-	klog.Info("Starting Ingress worker")
-	for c.processQueueItem(c.IngressQueue, c.updateIngress, func(err error, key interface{}) {
+	klog.Info("Starting ingress whitelister worker")
+	for c.processQueueItem(c.IngressQueue, c.processIngress, func(err error, key interface{}) {
 		c.handleErrProcessingQueue("Ingress", c.IngressQueue, err, key)
 	}) {
 	}
-	klog.Info("Stopping Ingress worker")
+	klog.Info("Stopping ingress whitelister worker")
 }
 
 func (c *IngressWhitelisterController) runConfigMapWorker() {
-	klog.Info("Starting ConfigMap worker")
-	for c.processQueueItem(c.ConfigMapQueue, c.updateWhiteListRanges, func(err error, key interface{}) {
+	klog.Info("Starting whitelist watcher worker")
+	for c.processQueueItem(c.ConfigMapQueue, c.processWhitelists, func(err error, key interface{}) {
 		c.handleErrProcessingQueue("ConfigMap", c.ConfigMapQueue, err, key)
 	}) {
 	}
-	klog.Info("Stopping ConfigMap worker")
+	klog.Info("Stopping whitelist watcher worker")
 }
 
 func homeDir() string {
@@ -358,12 +387,12 @@ func NewIngressWatcher(clientset *kubernetes.Clientset) *cache.ListWatch {
 		clientset.ExtensionsV1beta1().RESTClient(), "ingresses", v1.NamespaceAll, fields.Everything())
 }
 
-func NewQueueAddingEventHandler(queue workqueue.RateLimitingInterface, queueName string) cache.ResourceEventHandlerFuncs {
+func NewQueueAddingEventHandler(queue workqueue.RateLimitingInterface) cache.ResourceEventHandlerFuncs {
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(obj)
 			if err == nil {
-				klog.Infof("add key %s to queue %s on add event", key, queueName)
+				klog.Infof("Key \"%s\" added", key)
 				queue.Add(key)
 			} else {
 				klog.Warning(err)
@@ -372,7 +401,7 @@ func NewQueueAddingEventHandler(queue workqueue.RateLimitingInterface, queueName
 		UpdateFunc: func(old interface{}, new interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(new)
 			if err == nil {
-				klog.Infof("add key %s to queue %s on update event", key, queueName)
+				klog.Infof("Key \"%s\" updated", key)
 				queue.Add(key)
 			} else {
 				klog.Warning(err)
@@ -381,7 +410,7 @@ func NewQueueAddingEventHandler(queue workqueue.RateLimitingInterface, queueName
 		DeleteFunc: func(obj interface{}) {
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 			if err == nil {
-				klog.Infof("add key %s to queue %s on delete event", key, queueName)
+				klog.Infof("Key \"%s\" deleted", key)
 				queue.Add(key)
 			} else {
 				klog.Warning(err)
@@ -423,12 +452,11 @@ func main() {
 	configMapWatcher := NewConfigMapWatcher(clientset, configMap)
 	ingressWatcher := NewIngressWatcher(clientset)
 
-	// create the workqueue
 	configMapQueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 	ingressQueue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
-	configMapIndexer, configMapInformer := cache.NewIndexerInformer(configMapWatcher, &v1.ConfigMap{}, 0, NewQueueAddingEventHandler(configMapQueue, "ConfigMap"), cache.Indexers{})
-	ingressIndexer, ingressInformer := cache.NewIndexerInformer(ingressWatcher, &v1beta1.Ingress{}, 0, NewQueueAddingEventHandler(ingressQueue, "Ingress"), cache.Indexers{})
+	configMapIndexer, configMapInformer := cache.NewIndexerInformer(configMapWatcher, &v1.ConfigMap{}, 0, NewQueueAddingEventHandler(configMapQueue), cache.Indexers{})
+	ingressIndexer, ingressInformer := cache.NewIndexerInformer(ingressWatcher, &v1beta1.Ingress{}, 0, NewQueueAddingEventHandler(ingressQueue), cache.Indexers{})
 
 	controller := NewController(
 		clientset,
