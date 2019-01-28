@@ -1,0 +1,79 @@
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: ingress-whitelister
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - ingress-whitelister
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: ingress-whitelister
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ingress-whitelister
+subjects:
+  - kind: ServiceAccount
+    name: ingress-whitelister
+    namespace: default
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ingress-whitelister
+  namespace: default
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: ingress-whitelister
+  labels:
+    name: ingress-whitelister
+    tier: controller
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: ingress-whitelister
+        tier: controller
+    spec:
+      serviceAccountName: ingress-whitelister
+      containers:
+        - image: k911/ingress-whitelister:v1.0.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --configmap=default/ingress-whitelister
+            - --whitelist-annotation=ingress-whitelister.ingress.kubernetes.io/whitelist-name
+            - --whitelist-source-ranges-annotation=ingress-whitelister.ingress.kubernetes.io/whitelist-source-range
+            - --kubeconfig=
+            - --master=
+            - --v=10
+          name: ingress-whitelister
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 30m
+              memory: 64Mi
