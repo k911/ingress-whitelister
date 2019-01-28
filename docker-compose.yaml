@@ -1,0 +1,17 @@
+version: "3.7"
+
+services:
+  # docker-compose run go test
+  go:
+    image: ingress-whitelister-builder:local
+    build:
+      context: .
+      target: Go
+
+  controller:
+    image: ingress-whitelister:local
+    build:
+      context: .
+      target: Controller
+    volumes:
+      - "~/.kube/config:/.kube/config:ro"
