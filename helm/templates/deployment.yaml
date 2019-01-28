@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "helm.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "helm.name" . }}
+    helm.sh/chart: {{ include "helm.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "helm.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "helm.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+{{- if .Values.rbac.enabled }}
+      serviceAccountName: {{ include "helm.fullname" . }}
+{{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+{{- if .Values.whitelistsConfigMap.ref.name }}
+            - --configmap={{ .Values.whitelistsConfigMap.ref.namespace | default .Release.Namespace }}/{{ .Values.whitelistsConfigMap.ref.name }}
+{{- else }}
+            - --configmap={{ .Release.Namespace }}/{{ include "helm.fullname" . }}
+{{- end }}
+            - --whitelist-annotation={{ .Values.ingress.annotation.whiteListName }}
+            - --whitelist-source-ranges-annotation={{ .Values.ingress.annotation.whitelistSourceRanges }}
+            - --kubeconfig=
+            - --master=
+{{- if .Values.debug }}
+            - --v=10
+{{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}

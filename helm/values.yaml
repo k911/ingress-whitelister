@@ -1,0 +1,52 @@
+image:
+  repository: k911/ingress-whitelister
+  tag: v1.0.0
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+
+ingress:
+  annotation:
+    whiteListName: ingress-whitelister.ingress.kubernetes.io/whitelist-name
+    whitelistSourceRanges: ingress-whitelister.ingress.kubernetes.io/whitelist-source-range
+
+    # for traefik ingress controller
+    # whitelistSourceRanges: traefik.ingress.kubernetes.io/whitelist-source-range
+
+    # for nginx ingress controller
+    # whitelistSourceRanges: nginx.ingress.kubernetes.io/whitelist-source-range
+
+    # for haproxy ingress controller
+    # whitelistSourceRanges: ingress.kubernetes.io/whitelist-source-range
+
+
+whitelistsConfigMap: 
+  ref:
+    name: "" # provide to use externl configmap
+    namespace: "" # defaults to release deployment namespace
+
+  # relevant only if external config map is provided
+  content: |
+  #             contents of whitelist (e.g. CIDR ranges, separated by commas)
+  # whitelist1: 192.0.0.0/8, 10.0.0.0/8
+
+debug: false
+
+resources:
+  limits:
+   cpu: 100m
+   memory: 128Mi
+  requests:
+   cpu: 30m
+   memory: 64Mi
+
+rbac:
+  enabled: true
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
